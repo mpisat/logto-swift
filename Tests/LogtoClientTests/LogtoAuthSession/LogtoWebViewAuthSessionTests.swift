@@ -1,102 +1,118 @@
-//
-//  LogtoWebViewAuthSessionTests.swift
-//
-//
-//  Created by Gao Sun on 2022/4/14.
-//
+#if !os(macOS)
+    import AuthenticationServices
+    @testable import LogtoClient
+    import XCTest
 
-import Foundation
-@testable import LogtoClient
-import WebKit
-import XCTest
+    private let redirectUri = URL(string: "io.logto.test://callback")!
+    private let authUri = URL(string: "https://logto.dev/oidc/auth")!
 
-class LogtoWebViewAuthSessionMock: LogtoWebViewAuthSession {
-    let viewControllerMock = UIViewController()
-
-    override func getTopViewController() -> UnifiedViewController? {
-        viewControllerMock
-    }
-}
-
-final class WKNavigationActionMock: WKNavigationAction {
-    override var request: URLRequest { urlRequest }
-    let urlRequest: URLRequest
-
-    init(urlRequest: URLRequest) {
-        self.urlRequest = urlRequest
-        super.init()
-    }
-}
-
-final class LogtoWebViewAuthSessionTests: XCTestCase {
-    let mockUrl = URL(string: "https://logto.dev")!
-
-    func testStartWithNoTopViewController() {
-        let session = LogtoWebViewAuthSession(mockUrl, redirectUri: mockUrl, socialPlugins: []) { _ in }
-
-        XCTAssertEqual(session.start(), false)
-    }
-
-    @MainActor
-    func testStartOk() {
-        let session = LogtoWebViewAuthSessionMock(mockUrl, redirectUri: mockUrl, socialPlugins: []) { _ in }
-
-        XCTAssertEqual(session.start(), true)
-    }
-
-    actor CalledUrl {
-        var value: URL?
-
-        func update(_ value: URL?) {
-            self.value = value
-        }
-    }
-
-    @MainActor
-    func testDidfinishOk() async throws {
-        let calledUrl = CalledUrl()
-        let session = LogtoWebViewAuthSessionMock(mockUrl, redirectUri: mockUrl, socialPlugins: []) {
-            await calledUrl.update($0)
-        }
-
-        session.start()
-        await session.didFinish(url: mockUrl)
-
-        let value = await calledUrl.value
-        XCTAssertEqual(value, mockUrl)
-
-        try await Task.sleep(nanoseconds: UInt64(0.05 * Double(NSEC_PER_SEC)))
-        XCTAssertNil(session.viewController)
-    }
-
-    func testDelegateNavigationActionAllow() async {
-        let session = LogtoWebViewAuthSession(mockUrl, redirectUri: mockUrl, socialPlugins: []) { _ in }
-        let controller = await LogtoWebViewAuthViewController(authSession: session)
-
-        let task = Task { @MainActor in
-            let result = await controller.webView(
-                WKWebView(),
-                decidePolicyFor: WKNavigationActionMock(urlRequest: URLRequest(url: mockUrl))
+    /// Covers the system-browser presenter swap introduced by the
+    /// `native-browser` fork. Purely logic-level — no ASWebAuthenticationSession
+    /// is spun up, so these tests stay deterministic in CI.
+    final class LogtoWebViewAuthSessionTests: XCTestCase {
+        private func makeSession(
+            uri: URL = authUri,
+            redirect: URL = redirectUri,
+            onFinish: @escaping LogtoWebViewAuthSession.FinishHandler = { _, _ in }
+        ) -> LogtoWebViewAuthSession {
+            LogtoWebViewAuthSession(
+                uri,
+                redirectUri: redirect,
+                socialPlugins: [],
+                onFinish: onFinish
             )
-            XCTAssertEqual(result, .allow)
         }
 
-        await task.value
-    }
+        // MARK: handleCompletion redirect validation
 
-    func testDelegateNavigationActionCancel() async {
-        let mockUrl = URL(string: "logto://callback/path")!
-        let session = LogtoWebViewAuthSession(mockUrl, redirectUri: mockUrl, socialPlugins: []) { _ in }
-        let controller = await LogtoWebViewAuthViewController(authSession: session)
+        func testHandleCompletionAcceptsMatchingRedirect() async throws {
+            var received: URL?
+            let session = makeSession { url, _ in received = url }
 
-        let task = Task { @MainActor in
-            let result = await controller.webView(
-                WKWebView(),
-                decidePolicyFor: WKNavigationActionMock(urlRequest: URLRequest(url: mockUrl))
-            )
-            XCTAssertEqual(result, .cancel)
+            let callback = URL(string: "io.logto.test://callback?code=abc&state=xyz")!
+            await session.handleCompletion(callbackURL: callback, error: nil)
+
+            XCTAssertEqual(received, callback)
         }
 
-        await task.value
+        func testHandleCompletionIsSchemeCaseInsensitive() async throws {
+            var received: URL?
+            let session = makeSession { url, _ in received = url }
+
+            let callback = URL(string: "IO.LOGTO.TEST://callback?code=abc")!
+            await session.handleCompletion(callbackURL: callback, error: nil)
+
+            XCTAssertEqual(received, callback)
+        }
+
+        func testHandleCompletionRejectsMismatchedHost() async throws {
+            var received: URL? = URL(string: "placeholder://x")
+            var receivedError: Error?
+            let session = makeSession { url, error in
+                received = url
+                receivedError = error
+            }
+
+            let callback = URL(string: "io.logto.test://otherhost?code=abc")!
+            await session.handleCompletion(callbackURL: callback, error: nil)
+
+            XCTAssertNil(received)
+            XCTAssertNil(receivedError)
+        }
+
+        func testHandleCompletionRejectsMismatchedPath() async throws {
+            var received: URL? = URL(string: "placeholder://x")
+            let session = makeSession { url, _ in received = url }
+
+            let callback = URL(string: "io.logto.test://callback/evil?code=abc")!
+            await session.handleCompletion(callbackURL: callback, error: nil)
+
+            XCTAssertNil(received)
+        }
+
+        func testHandleCompletionForwardsErrorWhenURLMissing() async throws {
+            var received: URL? = URL(string: "placeholder://x")
+            var receivedError: Error?
+            let session = makeSession { url, error in
+                received = url
+                receivedError = error
+            }
+
+            let fakeError = NSError(domain: "test", code: 1)
+            await session.handleCompletion(callbackURL: nil, error: fakeError)
+
+            XCTAssertNil(received)
+            XCTAssertEqual((receivedError as NSError?)?.domain, "test")
+        }
+
+        // MARK: didFinish idempotency
+
+        func testDidFinishFiresOnFinishHandlerOnce() async throws {
+            var callCount = 0
+            let session = makeSession { _, _ in callCount += 1 }
+
+            await session.didFinish(url: nil, error: LogtoWebViewAuthViewError.noPresentationAnchor)
+            await session.didFinish(url: nil, error: LogtoWebViewAuthViewError.noPresentationAnchor)
+
+            XCTAssertEqual(callCount, 1)
+        }
+
+        // MARK: start() input validation
+
+        func testStartReturnsFalseForEmptyScheme() async throws {
+            let badRedirect = URL(string: "/no-scheme")!
+            let expectation = expectation(description: "onFinish fires with unableToConstructCallbackUri")
+            expectation.assertForOverFulfill = true
+
+            let session = makeSession(redirect: badRedirect) { _, error in
+                if case LogtoWebViewAuthViewError.unableToConstructCallbackUri = (error ?? NSError()) {
+                    expectation.fulfill()
+                }
+            }
+
+            let launched = session.start()
+            XCTAssertFalse(launched)
+            await fulfillment(of: [expectation], timeout: 1.0)
+        }
     }
-}
+#endif

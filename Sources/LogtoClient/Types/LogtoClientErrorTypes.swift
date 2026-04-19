@@ -36,6 +36,11 @@ public enum LogtoClientErrorTypes {
         /// Failed to complete the authentication.
         /// This could be an internal error or the user canceled the authentication.
         case authFailed
+        /// The user explicitly dismissed the system-provided sign-in sheet
+        /// (e.g. tapped Cancel on `ASWebAuthenticationSession`) before
+        /// completing sign-in. Use this to distinguish user intent from
+        /// genuine auth failures and skip noisy error surfaces.
+        case userCancelled
         /// Unable to construct Redirect URI for the given string.
         case unableToConstructRedirectUri
         /// Unable to construct Redirect URI for the config.

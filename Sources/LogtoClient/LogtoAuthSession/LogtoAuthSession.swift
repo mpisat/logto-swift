@@ -10,6 +10,10 @@ import Foundation
 import Logto
 import LogtoSocialPlugin
 
+#if !os(macOS)
+    import UIKit
+#endif
+
 class LogtoAuthSession {
     typealias Errors = LogtoClientErrors
 
@@ -25,6 +29,15 @@ class LogtoAuthSession {
     let loginHint: String?
     let directSignIn: LogtoCore.DirectSignInOptions?
     let extraParams: [String: String]?
+
+    #if !os(macOS)
+        /// Caller-preferred scene for anchoring `ASWebAuthenticationSession`.
+        /// Set this to the scene hosting the view controller invoking
+        /// sign-in so iPad Stage Manager / Split View anchors to the right
+        /// window. When `nil`, the presenter falls back to scanning
+        /// foreground-active scenes globally.
+        weak var preferredPresentationScene: UIWindowScene?
+    #endif
 
     internal var callbackUri: URL?
 
@@ -75,10 +88,16 @@ class LogtoAuthSession {
                     let session = LogtoWebViewAuthSession(
                         authUri,
                         redirectUri: redirectUri,
-                        socialPlugins: socialPlugins
-                    ) { [self] in
-                        guard let callbackUri = $0 else {
-                            continuation.resume(throwing: Errors.SignIn(type: .authFailed, innerError: nil))
+                        socialPlugins: socialPlugins,
+                        preferredPresentationScene: preferredPresentationScene
+                    ) { [self] callbackUri, error in
+                        if Self.isUserCancellation(error) {
+                            continuation.resume(throwing: Errors.SignIn(type: .userCancelled, innerError: error))
+                            return
+                        }
+
+                        guard let callbackUri = callbackUri else {
+                            continuation.resume(throwing: Errors.SignIn(type: .authFailed, innerError: error))
                             return
                         }
 
@@ -90,6 +109,12 @@ class LogtoAuthSession {
                         }
                     }
 
+                    // Capture `session` strongly in the main-queue closure so
+                    // it outlives the synchronous return of this closure. The
+                    // `LogtoWebViewAuthSession` itself is also retained by its
+                    // own `ASWebAuthenticationSession` completion handler
+                    // (see `LogtoWebViewAuthSession.start`), so nothing can
+                    // deallocate it mid-flow and silently drop the callback.
                     DispatchQueue.main.async {
                         session.start()
                     }
@@ -102,6 +127,27 @@ class LogtoAuthSession {
         } catch {
             throw Errors.SignIn(type: .unknownError, innerError: error)
         }
+    }
+
+    /// Detect the "user dismissed the system sheet" error surfaced by
+    /// `ASWebAuthenticationSession`. `.canceledLogin` is the canonical
+    /// code, but we also recognise our own `noPresentationAnchor` fault
+    /// as a cancellation — nothing was presented, so treat it as if the
+    /// user walked away.
+    private static func isUserCancellation(_ error: Error?) -> Bool {
+        guard let error = error else { return false }
+
+        if let asError = error as? ASWebAuthenticationSessionError,
+           asError.code == .canceledLogin
+        {
+            return true
+        }
+
+        if case LogtoWebViewAuthViewError.noPresentationAnchor = error {
+            return true
+        }
+
+        return false
     }
 
     func handle(callbackUri: URL) async throws -> LogtoCore.CodeTokenResponse {

@@ -49,6 +49,16 @@ public class LogtoClient {
 
     internal var accessTokenMap = [String: AccessToken]()
 
+    /// True while `loadFromKeychain()` is assigning into `idToken` and
+    /// `refreshToken`. Read by `saveToKeychain(forKey:)` to suppress the
+    /// `didSet` writeback so a transient read-failure-returning-nil
+    /// (locked device, errSecInteractionNotAllowed during background
+    /// pre-warm or VoIP push wake) does not permanently delete the
+    /// on-disk entry. Without this guard, the persistence layer was a
+    /// one-way trapdoor: any failed init-time read wiped the user's
+    /// session with no diagnostic trace.
+    internal var isLoadingFromKeychain = false
+
     // MARK: Public Variables
 
     /// The cached ID Token in raw string.

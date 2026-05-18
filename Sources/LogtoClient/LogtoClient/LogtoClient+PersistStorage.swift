@@ -33,6 +33,19 @@ extension LogtoClient {
         refreshToken = keychain[KeyName.refreshToken.rawValue]
     }
 
+    /// Re-reads the persisted tokens from the Keychain into the in-memory
+    /// `idToken` / `refreshToken`. Use this when the singleton was
+    /// initialized before the device was unlocked (background pre-warm,
+    /// VoIP push wake): the initial `loadFromKeychain` reads returned
+    /// nil due to `errSecInteractionNotAllowed`, the persistence guard
+    /// kept the on-disk entries intact, but the in-memory state is
+    /// stale. Calling this after first unlock rehydrates memory from
+    /// the surviving disk entries so the next refresh succeeds without
+    /// bouncing the user to sign-in.
+    public func reloadFromKeychain() {
+        loadFromKeychain()
+    }
+
     /// Persists the current value of the given key. Skipped during
     /// `loadFromKeychain` so a nil read does not delete the on-disk entry.
     /// A genuine nil (e.g. after `signOut`) is written through to delete

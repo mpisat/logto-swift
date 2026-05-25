@@ -139,7 +139,15 @@ public class LogtoClient {
         self.socialPlugins = [LogtoSocialPluginWeb()] + socialPlugins
 
         if config.usingPersistStorage {
+            // Explicit `.afterFirstUnlock` so a background VoIP push wake
+            // after the device's first unlock since reboot can still read
+            // the refresh token (Issue 182 prevention layer). The current
+            // KeychainAccess default is already `.afterFirstUnlock`, but
+            // pinning it here documents intent and protects against a
+            // future library default that would restrict reads to the
+            // currently-unlocked window (e.g. `.whenUnlocked`).
             keychain = Keychain(service: LogtoClient.keychainServiceName)
+                .accessibility(.afterFirstUnlock)
             loadFromKeychain()
         } else {
             keychain = nil

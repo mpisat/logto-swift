@@ -318,6 +318,88 @@ Anything that breaks these is a rebase-blocking regression:
    `state`, or `nonce`. This has always been upstream policy and the
    fork must not add instrumentation that weakens it.
 
+## 5.1 Account switching after sign-out — handled by the consumer
+
+`LogtoClient.signOut()` (upstream) clears tokens from memory / Keychain
+and revokes the refresh token against the OIDC provider. It does **not**
+hit Logto's `end_session_endpoint`. In the original WKWebView world that
+was fine: the embedded web view's cookie jar vanished with the view
+controller, so there was no residual session to clean up.
+
+With the system-browser fork that invariant flips. `ASWebAuthenticationSession`
+shares Safari's cookie jar (by design — see §1), so Logto's session
+cookie and the upstream social-provider cookie both survive an app-side
+`signOut()`. The next `signInWithBrowser` sees the still-valid Logto
+session cookie and silently re-authenticates with the last-used
+provider. The user-visible symptom is "I tap sign-in and I'm already
+signed in as the same account; I can't switch to a different Google
+account without clearing Safari cookies manually."
+
+The fork deliberately does **not** fix this itself. Two reasons:
+
+1. **Scope discipline.** The fork's diff is scoped to the sign-in
+   presenter (§3). Adding an end_session flow to `signOut` means
+   pulling in OIDC config fetch, another `ASWebAuthenticationSession`
+   presenter, scene-anchor logic duplication, and admin-side config
+   (`post_logout_redirect_uri`). All of that changes the upstream
+   contract and makes rebases harder.
+2. **Consumer-owned UX.** When and how to present the logout sheet is
+   app-level. Some apps may want it on every sign-out; others only when
+   the user explicitly taps "Switch account." Encoding either policy in
+   the SDK is wrong.
+
+**Recommended consumer pattern** (what Calido does — see
+`LOGTO-FORK.md §8.1` in the consuming app):
+
+```swift
+// Pseudocode — full implementation in MeetHDR/Services/CalidoAuth.swift
+let idTokenHint = logtoClient.idToken           // capture BEFORE clearing
+_ = await logtoClient.signOut()                 // revoke refresh token + clear local
+
+if let idTokenHint {
+    var components = URLComponents(string: "\(endpoint)/oidc/session/end")!
+    components.queryItems = [
+        URLQueryItem(name: "id_token_hint", value: idTokenHint),
+        URLQueryItem(name: "client_id", value: appId),
+        URLQueryItem(name: "post_logout_redirect_uri", value: "io.logto://callback"),
+    ]
+    let session = ASWebAuthenticationSession(
+        url: components.url!,
+        callbackURLScheme: "io.logto"
+    ) { _, _ in }
+    session.prefersEphemeralWebBrowserSession = false   // must share cookies
+    session.presentationContextProvider = anchorProvider
+    _ = session.start()
+    try? await Task.sleep(nanoseconds: 2_000_000_000)   // safety timeout
+    session.cancel()                                     // no-op if completed
+}
+```
+
+Notes for anyone copying this pattern:
+
+- **Do not substitute `prompt=login` on the authorize request.** It was
+  tried as an alternative (force Logto to reprompt even when a session
+  cookie exists) and it produced post-sign-in session instability in
+  Calido (immediate "session expired" after successful Gmail sign-in,
+  broken WebSocket reconnects). The clean separation — sign-in unchanged,
+  sign-out augmented — is the one that held up on device.
+- **Capture `id_token` before `signOut()`.** The SDK clears it
+  synchronously; reading it afterwards returns `nil` and Logto rejects
+  end_session without `id_token_hint`.
+- **`prefersEphemeralWebBrowserSession = false` is required.** Ephemeral
+  mode invalidates a cookie in its own private jar, which nothing else
+  can see. The whole point is the *shared* jar.
+- **2 s timeout.** Logto invalidates the session server-side the moment
+  the end_session GET lands, regardless of whether it can redirect back
+  to `post_logout_redirect_uri`. Cancelling the browser session after
+  the request is in flight is therefore safe. If the admin has
+  registered the redirect URI, Logto finishes in well under 2 s and the
+  timeout never fires.
+
+If upstream ever adds a built-in RP-initiated logout helper (they have
+`LogtoCore.generateSignOutUri` but no presenter glue), the fork should
+adopt it and this section should shrink to a pointer.
+
 ## 6. References
 
 - `LOGTO-FORK.md` (Calido repo): product-side contract, test

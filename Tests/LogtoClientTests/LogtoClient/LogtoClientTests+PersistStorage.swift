@@ -112,4 +112,34 @@ final class LogtoClientPersistStorageTests: XCTestCase {
         XCTAssertEqual(keychain[LogtoClient.KeyName.idToken.rawValue], "v2")
         XCTAssertEqual(keychain[LogtoClient.KeyName.refreshToken.rawValue], "v2")
     }
+
+    func testReloadResultDistinguishesLoadedTokensFromEmptyStorage() {
+        let client = LogtoClient(
+            useConfig: try! LogtoConfig(endpoint: "/", appId: "persist-result", usingPersistStorage: false),
+            session: NetworkSessionMock.shared
+        )
+
+        let loaded = client.loadFromKeychain { key in
+            key == LogtoClient.KeyName.refreshToken.rawValue ? "refresh" : nil
+        }
+        XCTAssertEqual(loaded, .loaded)
+
+        let empty = client.loadFromKeychain { _ in nil }
+        XCTAssertEqual(empty, .empty)
+    }
+
+    func testReloadFailurePreservesInMemoryTokensAndReportsFailure() {
+        let client = LogtoClient(
+            useConfig: try! LogtoConfig(endpoint: "/", appId: "persist-failure", usingPersistStorage: false),
+            session: NetworkSessionMock.shared
+        )
+        client.idToken = "memory-id"
+        client.refreshToken = "memory-refresh"
+
+        let result = client.loadFromKeychain { _ in throw Status.interactionNotAllowed }
+
+        XCTAssertEqual(result, .failed)
+        XCTAssertEqual(client.idToken, "memory-id")
+        XCTAssertEqual(client.refreshToken, "memory-refresh")
+    }
 }

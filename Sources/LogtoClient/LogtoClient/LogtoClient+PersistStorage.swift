@@ -7,6 +7,12 @@
 
 import Foundation
 
+public enum PersistedTokenReloadResult: Equatable {
+    case loaded
+    case empty
+    case failed
+}
+
 extension LogtoClient {
     enum KeyName: String {
         case idToken = "id_token"
@@ -21,16 +27,34 @@ extension LogtoClient {
     /// for the duration so the `didSet` observers on `idToken` / `refreshToken`
     /// do not write the just-read value (possibly nil from a locked-device
     /// read failure) back to the Keychain and erase the real entry.
-    func loadFromKeychain() {
+    @discardableResult
+    func loadFromKeychain() -> PersistedTokenReloadResult {
         guard let keychain = keychain else {
-            return
+            return .empty
+        }
+
+        return loadFromKeychain { try keychain.get($0) }
+    }
+
+    @discardableResult
+    func loadFromKeychain(
+        read: (String) throws -> String?
+    ) -> PersistedTokenReloadResult {
+        let loadedIdToken: String?
+        let loadedRefreshToken: String?
+        do {
+            loadedIdToken = try read(KeyName.idToken.rawValue)
+            loadedRefreshToken = try read(KeyName.refreshToken.rawValue)
+        } catch {
+            return .failed
         }
 
         isLoadingFromKeychain = true
         defer { isLoadingFromKeychain = false }
 
-        idToken = keychain[KeyName.idToken.rawValue]
-        refreshToken = keychain[KeyName.refreshToken.rawValue]
+        idToken = loadedIdToken
+        refreshToken = loadedRefreshToken
+        return loadedIdToken == nil && loadedRefreshToken == nil ? .empty : .loaded
     }
 
     /// Re-reads the persisted tokens from the Keychain into the in-memory
@@ -42,7 +66,8 @@ extension LogtoClient {
     /// stale. Calling this after first unlock rehydrates memory from
     /// the surviving disk entries so the next refresh succeeds without
     /// bouncing the user to sign-in.
-    public func reloadFromKeychain() {
+    @discardableResult
+    public func reloadFromKeychain() -> PersistedTokenReloadResult {
         loadFromKeychain()
     }
 

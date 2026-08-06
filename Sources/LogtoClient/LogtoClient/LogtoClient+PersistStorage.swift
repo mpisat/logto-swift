@@ -22,7 +22,7 @@ public enum PersistedTokenReloadResult: Equatable {
 /// error, so a failed write of a rotated refresh token was indistinguishable
 /// from a successful one and the next cold launch read a superseded token off
 /// disk. This type closes that gap.
-public enum PersistedTokenWriteResult: Equatable {
+public enum PersistedTokenWriteResult: Equatable, Sendable {
     /// Written, or removed, and confirmed by reading the value back.
     case verified
     /// The Keychain call reported success but the read-back did not match what
@@ -37,7 +37,7 @@ public enum PersistedTokenWriteResult: Equatable {
 }
 
 /// One persist attempt, reported to the host through `onTokenPersist`.
-public struct PersistedTokenWriteReport: Equatable {
+public struct PersistedTokenWriteReport: Equatable, Sendable {
     /// The raw Keychain key, `id_token` or `refresh_token`. Never the value.
     public let key: String
     public let result: PersistedTokenWriteResult

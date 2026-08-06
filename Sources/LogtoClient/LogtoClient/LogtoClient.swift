@@ -72,7 +72,10 @@ public class LogtoClient {
     /// to be silent: the host had no way to know its session had become
     /// undurable, and the next cold launch presented a superseded token and
     /// was forced back through the browser.
-    public var onTokenPersist: ((PersistedTokenWriteReport) -> Void)?
+    /// Invoked synchronously from the `didSet` observers, which run on
+    /// whichever executor performed the assignment, so it is `@Sendable` and
+    /// the host is responsible for hopping to its own isolation.
+    public var onTokenPersist: (@Sendable (PersistedTokenWriteReport) -> Void)?
 
     /// The cached ID Token in raw string.
     /// Use `.getIdTokenClaims()` to retrieve structured data.

@@ -145,6 +145,25 @@ final class LogtoClientPersistStorageTests: XCTestCase {
 
     // MARK: Verified writes
 
+    /// `onTokenPersist` is `@Sendable`, so a test cannot capture a plain `var`
+    /// to collect reports. This is the minimum that satisfies it.
+    private final class ReportCollector: @unchecked Sendable {
+        private let lock = NSLock()
+        private var storage: [PersistedTokenWriteReport] = []
+
+        func append(_ report: PersistedTokenWriteReport) {
+            lock.lock()
+            defer { lock.unlock() }
+            storage.append(report)
+        }
+
+        var reports: [PersistedTokenWriteReport] {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+    }
+
     /// Builds a client with no real Keychain so the write path can be driven
     /// through the injectable `persist` overload.
     private func makeDetachedClient(_ appId: String) -> LogtoClient {
@@ -182,8 +201,8 @@ final class LogtoClientPersistStorageTests: XCTestCase {
     func testFailedWriteSurfacesOSStatusAndIsMarkedPending() {
         let client = makeDetachedClient("persist-write-fail")
         client.refreshToken = "rotated"
-        var reports: [PersistedTokenWriteReport] = []
-        client.onTokenPersist = { reports.append($0) }
+        let collector = ReportCollector()
+        client.onTokenPersist = { collector.append($0) }
 
         let report = client.persist(
             key: .refreshToken,
@@ -195,8 +214,8 @@ final class LogtoClientPersistStorageTests: XCTestCase {
 
         XCTAssertEqual(report.result, .failed(Status.interactionNotAllowed.rawValue))
         XCTAssertTrue(client.hasPendingTokenWrites)
-        XCTAssertEqual(reports.count, 1)
-        XCTAssertEqual(reports.first?.key, "refresh_token")
+        XCTAssertEqual(collector.reports.count, 1)
+        XCTAssertEqual(collector.reports.first?.key, "refresh_token")
     }
 
     /// A write that reports success but does not actually land. The subscript
@@ -333,14 +352,14 @@ final class LogtoClientPersistStorageTests: XCTestCase {
             useConfig: try! LogtoConfig(endpoint: "/", appId: "persist-observer"),
             session: NetworkSessionMock.shared
         )
-        var reports: [PersistedTokenWriteReport] = []
-        client.onTokenPersist = { reports.append($0) }
+        let collector = ReportCollector()
+        client.onTokenPersist = { collector.append($0) }
 
         client.refreshToken = "r1"
         client.idToken = "i1"
 
-        XCTAssertEqual(reports.map(\.key), ["refresh_token", "id_token"])
-        XCTAssertEqual(reports.map(\.result), [.verified, .verified])
+        XCTAssertEqual(collector.reports.map(\.key), ["refresh_token", "id_token"])
+        XCTAssertEqual(collector.reports.map(\.result), [.verified, .verified])
         XCTAssertFalse(client.hasPendingTokenWrites)
     }
 }

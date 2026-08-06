@@ -236,6 +236,48 @@ final class LogtoClientPersistStorageTests: XCTestCase {
         XCTAssertTrue(client.hasPendingTokenWrites)
     }
 
+    /// Persistence bookkeeping is touched by token assignments on a generic
+    /// executor and by lifecycle retries on the main actor. A state read must
+    /// not race an in-flight persist operation.
+    func testPendingStateReadWaitsForInFlightPersist() {
+        let client = makeDetachedClient("persist-state-serialization")
+        client.refreshToken = "rotated"
+        let writeEntered = DispatchSemaphore(value: 0)
+        let allowWrite = DispatchSemaphore(value: 0)
+        let persistCompleted = DispatchSemaphore(value: 0)
+        let stateReadCompleted = DispatchSemaphore(value: 0)
+
+        DispatchQueue.global().async {
+            client.persist(
+                key: .refreshToken,
+                isRetry: false,
+                write: { _, _ in
+                    writeEntered.signal()
+                    allowWrite.wait()
+                },
+                remove: { _ in },
+                read: { _ in "rotated" }
+            )
+            persistCompleted.signal()
+        }
+
+        XCTAssertEqual(writeEntered.wait(timeout: .now() + 1), .success)
+        DispatchQueue.global().async {
+            _ = client.hasPendingTokenWrites
+            stateReadCompleted.signal()
+        }
+
+        XCTAssertEqual(
+            stateReadCompleted.wait(timeout: .now() + 0.1),
+            .timedOut,
+            "pending state must be serialized with the in-flight persist"
+        )
+
+        allowWrite.signal()
+        XCTAssertEqual(persistCompleted.wait(timeout: .now() + 1), .success)
+        XCTAssertEqual(stateReadCompleted.wait(timeout: .now() + 1), .success)
+    }
+
     /// A non-`Status` error still reports a failure, with no `OSStatus`.
     func testNonStatusErrorReportsFailedWithoutOSStatus() {
         struct Opaque: Error {}
@@ -336,6 +378,28 @@ final class LogtoClientPersistStorageTests: XCTestCase {
         XCTAssertEqual(store["refresh_token"], "current")
     }
 
+    /// Exercises the public orchestration rather than the injectable persist
+    /// core: both pending values are replayed, with the refresh token first.
+    func testPublicRetryReplaysCapturedPendingValuesRefreshFirst() {
+        let client = LogtoClient(
+            useConfig: try! LogtoConfig(endpoint: "/", appId: "persist-public-retry"),
+            session: NetworkSessionMock.shared
+        )
+        let collector = ReportCollector()
+        client.onTokenPersist = { collector.append($0) }
+        client.pendingTokenWrites[.idToken] = .init(value: "pending-id")
+        client.pendingTokenWrites[.refreshToken] = .init(value: "pending-refresh")
+
+        let reports = client.retryPendingTokenWrites()
+
+        XCTAssertEqual(reports.map(\.key), ["refresh_token", "id_token"])
+        XCTAssertEqual(reports.map(\.result), [.verified, .verified])
+        XCTAssertEqual(collector.reports, reports)
+        XCTAssertEqual(keychain["refresh_token"], "pending-refresh")
+        XCTAssertEqual(keychain["id_token"], "pending-id")
+        XCTAssertFalse(client.hasPendingTokenWrites)
+    }
+
     /// With no Keychain configured there is nothing to retry and the call is
     /// inert rather than an error.
     func testRetryIsInertWithoutPersistStorage() {
@@ -343,6 +407,23 @@ final class LogtoClientPersistStorageTests: XCTestCase {
         client.refreshToken = "rotated"
 
         XCTAssertTrue(client.retryPendingTokenWrites().isEmpty)
+    }
+
+    /// Disabled persistence is an intentional skipped attempt, not silence.
+    /// This keeps the public callback contract exhaustive without marking the
+    /// key pending.
+    func testAssignmentWithoutPersistStorageReportsSkipped() {
+        let client = makeDetachedClient("persist-skipped")
+        let collector = ReportCollector()
+        client.onTokenPersist = { collector.append($0) }
+
+        client.refreshToken = "memory-only"
+
+        XCTAssertEqual(
+            collector.reports,
+            [PersistedTokenWriteReport(key: "refresh_token", result: .skipped, isRetry: false)]
+        )
+        XCTAssertFalse(client.hasPendingTokenWrites)
     }
 
     /// Real Keychain, real read-back: a rotation reports verified and the

@@ -78,21 +78,23 @@ extension LogtoClient {
     func loadFromKeychain(
         read: (String) throws -> String?
     ) -> PersistedTokenReloadResult {
-        let loadedIdToken: String?
-        let loadedRefreshToken: String?
-        do {
-            loadedIdToken = try read(KeyName.idToken.rawValue)
-            loadedRefreshToken = try read(KeyName.refreshToken.rawValue)
-        } catch {
-            return .failed
+        withTokenPersistLock {
+            let loadedIdToken: String?
+            let loadedRefreshToken: String?
+            do {
+                loadedIdToken = try read(KeyName.idToken.rawValue)
+                loadedRefreshToken = try read(KeyName.refreshToken.rawValue)
+            } catch {
+                return .failed
+            }
+
+            isLoadingFromKeychain = true
+            defer { isLoadingFromKeychain = false }
+
+            idToken = loadedIdToken
+            refreshToken = loadedRefreshToken
+            return loadedIdToken == nil && loadedRefreshToken == nil ? .empty : .loaded
         }
-
-        isLoadingFromKeychain = true
-        defer { isLoadingFromKeychain = false }
-
-        idToken = loadedIdToken
-        refreshToken = loadedRefreshToken
-        return loadedIdToken == nil && loadedRefreshToken == nil ? .empty : .loaded
     }
 
     /// Re-reads the persisted tokens from the Keychain into the in-memory
@@ -114,10 +116,34 @@ extension LogtoClient {
     /// A genuine nil (e.g. after `signOut`) is written through to delete
     /// the entry as before.
     func saveToKeychain(forKey key: KeyName) {
-        guard !isLoadingFromKeychain else { return }
-        guard let keychain = keychain else { return }
+        guard let keychain = keychain else {
+            let callback = withTokenPersistLock { tokenPersistCallback }
+            callback?(
+                PersistedTokenWriteReport(
+                    key: key.rawValue,
+                    result: .skipped,
+                    isRetry: false
+                )
+            )
+            return
+        }
 
-        persist(key: key, isRetry: false, using: keychain)
+        let attempt: (PersistedTokenWriteReport, (@Sendable (PersistedTokenWriteReport) -> Void)?)? =
+            withTokenPersistLock {
+                guard !isLoadingFromKeychain else { return nil }
+                let report = persistLocked(
+                    key: key,
+                    intended: inMemoryValue(forKey: key),
+                    isRetry: false,
+                    write: { try keychain.set($0, key: $1) },
+                    remove: { try keychain.remove($0) },
+                    read: { try keychain.get($0) }
+                )
+                return (report, tokenPersistCallback)
+            }
+
+        guard let (report, callback) = attempt else { return }
+        callback?(report)
     }
 
     /// Re-attempts every write that has not been confirmed, using the
@@ -133,18 +159,32 @@ extension LogtoClient {
     public func retryPendingTokenWrites() -> [PersistedTokenWriteReport] {
         guard let keychain = keychain else { return [] }
 
-        // Refresh token first: it is the one whose loss forces a browser
-        // sign-in, so it should win any partial-success race with the
-        // id token.
-        let ordered: [KeyName] = [.refreshToken, .idToken]
-        return ordered
-            .filter { pendingTokenWrites.contains($0) }
-            .map { persist(key: $0, isRetry: true, using: keychain) }
+        let (reports, callback) = withTokenPersistLock {
+            // Refresh token first: it is the one whose loss forces a browser
+            // sign-in, so it should win any partial-success race with the
+            // id token.
+            let ordered: [KeyName] = [.refreshToken, .idToken]
+            let reports = ordered.compactMap { key -> PersistedTokenWriteReport? in
+                guard let pending = pendingTokenWrites[key] else { return nil }
+                return persistLocked(
+                    key: key,
+                    intended: pending.value,
+                    isRetry: true,
+                    write: { try keychain.set($0, key: $1) },
+                    remove: { try keychain.remove($0) },
+                    read: { try keychain.get($0) }
+                )
+            }
+            return (reports, tokenPersistCallback)
+        }
+
+        reports.forEach { callback?($0) }
+        return reports
     }
 
     /// Whether any token write is still unconfirmed.
     public var hasPendingTokenWrites: Bool {
-        !pendingTokenWrites.isEmpty
+        withTokenPersistLock { !pendingTokenWrites.isEmpty }
     }
 
     @discardableResult
@@ -168,8 +208,30 @@ extension LogtoClient {
         remove: (String) throws -> Void,
         read: (String) throws -> String?
     ) -> PersistedTokenWriteReport {
+        let (report, callback) = withTokenPersistLock {
+            let report = persistLocked(
+                key: key,
+                intended: inMemoryValue(forKey: key),
+                isRetry: isRetry,
+                write: write,
+                remove: remove,
+                read: read
+            )
+            return (report, tokenPersistCallback)
+        }
+        callback?(report)
+        return report
+    }
+
+    private func persistLocked(
+        key: KeyName,
+        intended: String?,
+        isRetry: Bool,
+        write: (String, String) throws -> Void,
+        remove: (String) throws -> Void,
+        read: (String) throws -> String?
+    ) -> PersistedTokenWriteReport {
         let name = key.rawValue
-        let intended = inMemoryValue(forKey: key)
         let result: PersistedTokenWriteResult
 
         do {
@@ -186,14 +248,12 @@ extension LogtoClient {
         }
 
         if result == .verified {
-            pendingTokenWrites.remove(key)
+            pendingTokenWrites[key] = nil
         } else {
-            pendingTokenWrites.insert(key)
+            pendingTokenWrites[key] = PendingTokenWrite(value: intended)
         }
 
-        let report = PersistedTokenWriteReport(key: name, result: result, isRetry: isRetry)
-        onTokenPersist?(report)
-        return report
+        return PersistedTokenWriteReport(key: name, result: result, isRetry: isRetry)
     }
 
     private func inMemoryValue(forKey key: KeyName) -> String? {

@@ -59,9 +59,26 @@ public class LogtoClient {
     /// session with no diagnostic trace.
     internal var isLoadingFromKeychain = false
 
-    /// Keys whose last persist attempt was not confirmed by a read-back.
-    /// Retried by `retryPendingTokenWrites()` from the in-memory value.
-    internal var pendingTokenWrites = Set<KeyName>()
+    /// Serializes persistence bookkeeping across token updates and lifecycle
+    /// retries, which can arrive on different executors.
+    internal let tokenPersistLock = NSRecursiveLock()
+
+    struct PendingTokenWrite {
+        let value: String?
+    }
+
+    /// Latest value whose persist attempt was not confirmed by a read-back.
+    /// The captured value avoids reading token properties concurrently from a
+    /// lifecycle retry running on another executor.
+    internal var pendingTokenWrites = [KeyName: PendingTokenWrite]()
+    internal var tokenPersistCallback: (@Sendable (PersistedTokenWriteReport) -> Void)?
+
+    @discardableResult
+    internal func withTokenPersistLock<T>(_ operation: () throws -> T) rethrows -> T {
+        tokenPersistLock.lock()
+        defer { tokenPersistLock.unlock() }
+        return try operation()
+    }
 
     // MARK: Public Variables
 
@@ -75,7 +92,10 @@ public class LogtoClient {
     /// Invoked synchronously from the `didSet` observers, which run on
     /// whichever executor performed the assignment, so it is `@Sendable` and
     /// the host is responsible for hopping to its own isolation.
-    public var onTokenPersist: (@Sendable (PersistedTokenWriteReport) -> Void)?
+    public var onTokenPersist: (@Sendable (PersistedTokenWriteReport) -> Void)? {
+        get { withTokenPersistLock { tokenPersistCallback } }
+        set { withTokenPersistLock { tokenPersistCallback = newValue } }
+    }
 
     /// The cached ID Token in raw string.
     /// Use `.getIdTokenClaims()` to retrieve structured data.

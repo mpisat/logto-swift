@@ -142,4 +142,205 @@ final class LogtoClientPersistStorageTests: XCTestCase {
         XCTAssertEqual(client.idToken, "memory-id")
         XCTAssertEqual(client.refreshToken, "memory-refresh")
     }
+
+    // MARK: Verified writes
+
+    /// Builds a client with no real Keychain so the write path can be driven
+    /// through the injectable `persist` overload.
+    private func makeDetachedClient(_ appId: String) -> LogtoClient {
+        LogtoClient(
+            useConfig: try! LogtoConfig(endpoint: "/", appId: appId, usingPersistStorage: false),
+            session: NetworkSessionMock.shared
+        )
+    }
+
+    /// The happy path: the value lands and the read-back matches, so nothing
+    /// is left pending.
+    func testVerifiedWriteReportsVerifiedAndLeavesNothingPending() {
+        let client = makeDetachedClient("persist-write-ok")
+        client.refreshToken = "rotated"
+        var store: [String: String] = [:]
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { store[$1] = $0 },
+            remove: { store[$0] = nil },
+            read: { store[$0] }
+        )
+
+        XCTAssertEqual(report.result, .verified)
+        XCTAssertEqual(report.key, "refresh_token")
+        XCTAssertFalse(report.isRetry)
+        XCTAssertFalse(client.hasPendingTokenWrites)
+        XCTAssertEqual(store["refresh_token"], "rotated")
+    }
+
+    /// The defect this change exists for. Before it, this write returned
+    /// nothing and the caller carried on believing the rotated token was
+    /// durable.
+    func testFailedWriteSurfacesOSStatusAndIsMarkedPending() {
+        let client = makeDetachedClient("persist-write-fail")
+        client.refreshToken = "rotated"
+        var reports: [PersistedTokenWriteReport] = []
+        client.onTokenPersist = { reports.append($0) }
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { _, _ in throw Status.interactionNotAllowed },
+            remove: { _ in },
+            read: { _ in nil }
+        )
+
+        XCTAssertEqual(report.result, .failed(Status.interactionNotAllowed.rawValue))
+        XCTAssertTrue(client.hasPendingTokenWrites)
+        XCTAssertEqual(reports.count, 1)
+        XCTAssertEqual(reports.first?.key, "refresh_token")
+    }
+
+    /// A write that reports success but does not actually land. The subscript
+    /// could not tell this apart from success either.
+    func testWriteThatDoesNotLandReportsUnverifiedAndIsMarkedPending() {
+        let client = makeDetachedClient("persist-write-silent")
+        client.refreshToken = "rotated"
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { _, _ in },
+            remove: { _ in },
+            read: { _ in nil }
+        )
+
+        XCTAssertEqual(report.result, .unverified)
+        XCTAssertTrue(client.hasPendingTokenWrites)
+    }
+
+    /// A non-`Status` error still reports a failure, with no `OSStatus`.
+    func testNonStatusErrorReportsFailedWithoutOSStatus() {
+        struct Opaque: Error {}
+        let client = makeDetachedClient("persist-write-opaque")
+        client.refreshToken = "rotated"
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { _, _ in throw Opaque() },
+            remove: { _ in },
+            read: { _ in nil }
+        )
+
+        XCTAssertEqual(report.result, .failed(nil))
+    }
+
+    /// Sign-out clears the entry, and a confirmed absence counts as verified.
+    func testRemovalIsVerifiedWhenTheEntryIsGone() {
+        let client = makeDetachedClient("persist-remove")
+        var store: [String: String] = ["refresh_token": "stale"]
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { store[$1] = $0 },
+            remove: { store[$0] = nil },
+            read: { store[$0] }
+        )
+
+        XCTAssertEqual(report.result, .verified)
+        XCTAssertNil(store["refresh_token"])
+    }
+
+    /// A failed removal is retryable too, otherwise sign-out could leave a
+    /// live credential on disk with nothing tracking it.
+    func testFailedRemovalIsMarkedPending() {
+        let client = makeDetachedClient("persist-remove-fail")
+
+        let report = client.persist(
+            key: .refreshToken,
+            isRetry: false,
+            write: { _, _ in },
+            remove: { _ in throw Status.interactionNotAllowed },
+            read: { _ in "still-here" }
+        )
+
+        XCTAssertEqual(report.result, .failed(Status.interactionNotAllowed.rawValue))
+        XCTAssertTrue(client.hasPendingTokenWrites)
+    }
+
+    /// Step 3: the retry writes the **in-memory** value, which is the current
+    /// one, and clears the pending flag once the read-back matches.
+    func testRetryWritesInMemoryValueAndClearsPending() {
+        let client = makeDetachedClient("persist-retry")
+        client.refreshToken = "rotated"
+        var store: [String: String] = [:]
+        var locked = true
+
+        let write: (String, String) throws -> Void = { value, key in
+            if locked { throw Status.interactionNotAllowed }
+            store[key] = value
+        }
+        let read: (String) throws -> String? = { store[$0] }
+
+        let first = client.persist(key: .refreshToken, isRetry: false,
+                                   write: write, remove: { store[$0] = nil }, read: read)
+        XCTAssertEqual(first.result, .failed(Status.interactionNotAllowed.rawValue))
+        XCTAssertTrue(client.hasPendingTokenWrites)
+
+        locked = false
+        let retry = client.persist(key: .refreshToken, isRetry: true,
+                                   write: write, remove: { store[$0] = nil }, read: read)
+
+        XCTAssertEqual(retry.result, .verified)
+        XCTAssertTrue(retry.isRetry)
+        XCTAssertFalse(client.hasPendingTokenWrites)
+        XCTAssertEqual(store["refresh_token"], "rotated")
+        XCTAssertEqual(client.refreshToken, "rotated", "retry must not mutate memory")
+    }
+
+    /// The retry must never pull disk into memory. A stale on-disk value that
+    /// the process already replaced stays overwritten, not restored.
+    func testRetryDoesNotLoadDiskIntoMemory() {
+        let client = makeDetachedClient("persist-retry-direction")
+        client.refreshToken = "current"
+        var store: [String: String] = ["refresh_token": "superseded"]
+
+        client.persist(
+            key: .refreshToken,
+            isRetry: true,
+            write: { store[$1] = $0 },
+            remove: { store[$0] = nil },
+            read: { store[$0] }
+        )
+
+        XCTAssertEqual(client.refreshToken, "current")
+        XCTAssertEqual(store["refresh_token"], "current")
+    }
+
+    /// With no Keychain configured there is nothing to retry and the call is
+    /// inert rather than an error.
+    func testRetryIsInertWithoutPersistStorage() {
+        let client = makeDetachedClient("persist-retry-inert")
+        client.refreshToken = "rotated"
+
+        XCTAssertTrue(client.retryPendingTokenWrites().isEmpty)
+    }
+
+    /// Real Keychain, real read-back: a rotation reports verified and the
+    /// observer sees exactly one report per assignment.
+    func testRealKeychainRotationReportsVerifiedPerAssignment() {
+        let client = LogtoClient(
+            useConfig: try! LogtoConfig(endpoint: "/", appId: "persist-observer"),
+            session: NetworkSessionMock.shared
+        )
+        var reports: [PersistedTokenWriteReport] = []
+        client.onTokenPersist = { reports.append($0) }
+
+        client.refreshToken = "r1"
+        client.idToken = "i1"
+
+        XCTAssertEqual(reports.map(\.key), ["refresh_token", "id_token"])
+        XCTAssertEqual(reports.map(\.result), [.verified, .verified])
+        XCTAssertFalse(client.hasPendingTokenWrites)
+    }
 }

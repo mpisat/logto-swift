@@ -59,7 +59,20 @@ public class LogtoClient {
     /// session with no diagnostic trace.
     internal var isLoadingFromKeychain = false
 
+    /// Keys whose last persist attempt was not confirmed by a read-back.
+    /// Retried by `retryPendingTokenWrites()` from the in-memory value.
+    internal var pendingTokenWrites = Set<KeyName>()
+
     // MARK: Public Variables
+
+    /// Called after every persist attempt, including retries. Reports the key
+    /// and the outcome, never the token value.
+    ///
+    /// Exists because a failed Keychain write of a rotated refresh token used
+    /// to be silent: the host had no way to know its session had become
+    /// undurable, and the next cold launch presented a superseded token and
+    /// was forced back through the browser.
+    public var onTokenPersist: ((PersistedTokenWriteReport) -> Void)?
 
     /// The cached ID Token in raw string.
     /// Use `.getIdTokenClaims()` to retrieve structured data.

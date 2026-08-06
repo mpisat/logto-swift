@@ -6,11 +6,49 @@
 //
 
 import Foundation
+import KeychainAccess
 
 public enum PersistedTokenReloadResult: Equatable {
     case loaded
     case empty
     case failed
+}
+
+/// Outcome of a single persist attempt for one token.
+///
+/// The read side has reported a three-state result since
+/// `PersistedTokenReloadResult` was added. The write side reported nothing at
+/// all: it assigned through the `KeychainAccess` subscript, which swallows the
+/// error, so a failed write of a rotated refresh token was indistinguishable
+/// from a successful one and the next cold launch read a superseded token off
+/// disk. This type closes that gap.
+public enum PersistedTokenWriteResult: Equatable {
+    /// Written, or removed, and confirmed by reading the value back.
+    case verified
+    /// The Keychain call reported success but the read-back did not match what
+    /// was intended. Treated as a failure for retry purposes.
+    case unverified
+    /// The write or remove threw. `OSStatus` is carried when `KeychainAccess`
+    /// reported one, and is nil for any other error type.
+    case failed(OSStatus?)
+    /// No Keychain is configured, i.e. `usingPersistStorage` is false. Not a
+    /// failure and never retried.
+    case skipped
+}
+
+/// One persist attempt, reported to the host through `onTokenPersist`.
+public struct PersistedTokenWriteReport: Equatable {
+    /// The raw Keychain key, `id_token` or `refresh_token`. Never the value.
+    public let key: String
+    public let result: PersistedTokenWriteResult
+    /// True when this attempt came from `retryPendingTokenWrites()`.
+    public let isRetry: Bool
+
+    public init(key: String, result: PersistedTokenWriteResult, isRetry: Bool) {
+        self.key = key
+        self.result = result
+        self.isRetry = isRetry
+    }
 }
 
 extension LogtoClient {
@@ -77,15 +115,93 @@ extension LogtoClient {
     /// the entry as before.
     func saveToKeychain(forKey key: KeyName) {
         guard !isLoadingFromKeychain else { return }
-        guard let keychain = keychain else {
-            return
+        guard let keychain = keychain else { return }
+
+        persist(key: key, isRetry: false, using: keychain)
+    }
+
+    /// Re-attempts every write that has not been confirmed, using the
+    /// **in-memory** value as the source of truth.
+    ///
+    /// Call this when protected data becomes available, i.e. after the first
+    /// unlock following a background wake. It never reads disk into memory:
+    /// the in-memory token is the one the running process has been using and
+    /// is by definition at least as current as anything on disk. Reloading in
+    /// the other direction here would overwrite a live rotated token with the
+    /// superseded one that failed to be replaced.
+    @discardableResult
+    public func retryPendingTokenWrites() -> [PersistedTokenWriteReport] {
+        guard let keychain = keychain else { return [] }
+
+        // Refresh token first: it is the one whose loss forces a browser
+        // sign-in, so it should win any partial-success race with the
+        // id token.
+        let ordered: [KeyName] = [.refreshToken, .idToken]
+        return ordered
+            .filter { pendingTokenWrites.contains($0) }
+            .map { persist(key: $0, isRetry: true, using: keychain) }
+    }
+
+    /// Whether any token write is still unconfirmed.
+    public var hasPendingTokenWrites: Bool {
+        !pendingTokenWrites.isEmpty
+    }
+
+    @discardableResult
+    func persist(key: KeyName, isRetry: Bool, using keychain: Keychain) -> PersistedTokenWriteReport {
+        persist(
+            key: key,
+            isRetry: isRetry,
+            write: { try keychain.set($0, key: $1) },
+            remove: { try keychain.remove($0) },
+            read: { try keychain.get($0) }
+        )
+    }
+
+    /// Injectable core of the persist path, so the failure modes can be tested
+    /// without a real Keychain. Mirrors `loadFromKeychain(read:)`.
+    @discardableResult
+    func persist(
+        key: KeyName,
+        isRetry: Bool,
+        write: (String, String) throws -> Void,
+        remove: (String) throws -> Void,
+        read: (String) throws -> String?
+    ) -> PersistedTokenWriteReport {
+        let name = key.rawValue
+        let intended = inMemoryValue(forKey: key)
+        let result: PersistedTokenWriteResult
+
+        do {
+            if let intended = intended {
+                try write(intended, name)
+            } else {
+                try remove(name)
+            }
+            result = try read(name) == intended ? .verified : .unverified
+        } catch let status as Status {
+            result = .failed(status.rawValue)
+        } catch {
+            result = .failed(nil)
         }
 
+        if result == .verified {
+            pendingTokenWrites.remove(key)
+        } else {
+            pendingTokenWrites.insert(key)
+        }
+
+        let report = PersistedTokenWriteReport(key: name, result: result, isRetry: isRetry)
+        onTokenPersist?(report)
+        return report
+    }
+
+    private func inMemoryValue(forKey key: KeyName) -> String? {
         switch key {
         case .idToken:
-            keychain[key.rawValue] = idToken
+            return idToken
         case .refreshToken:
-            keychain[key.rawValue] = refreshToken
+            return refreshToken
         }
     }
 }

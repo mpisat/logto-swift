@@ -72,6 +72,7 @@ public class LogtoClient {
     /// lifecycle retry running on another executor.
     internal var pendingTokenWrites = [KeyName: PendingTokenWrite]()
     internal var tokenPersistCallback: (@Sendable (PersistedTokenWriteReport) -> Void)?
+    internal var tokenRefreshCallback: (@Sendable (TokenRefreshReport) -> Void)?
 
     @discardableResult
     internal func withTokenPersistLock<T>(_ operation: () throws -> T) rethrows -> T {
@@ -95,6 +96,13 @@ public class LogtoClient {
     public var onTokenPersist: (@Sendable (PersistedTokenWriteReport) -> Void)? {
         get { withTokenPersistLock { tokenPersistCallback } }
         set { withTokenPersistLock { tokenPersistCallback = newValue } }
+    }
+
+    /// Reports every successful token refresh. Carries rotation flags only,
+    /// never token text. See `TokenRefreshReport`.
+    public var onTokenRefresh: (@Sendable (TokenRefreshReport) -> Void)? {
+        get { withTokenPersistLock { tokenRefreshCallback } }
+        set { withTokenPersistLock { tokenRefreshCallback = newValue } }
     }
 
     /// The cached ID Token in raw string.

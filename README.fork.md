@@ -251,6 +251,28 @@ cannot present headlessly in CI. Everything that runs in the tests is
 the logic we added; the presenter and anchor-resolution paths are
 exercised manually on-device per `LOGTO-FORK.md §8`.
 
+### 3.9 Token persistence and refresh telemetry (Calido `IOS-050` lineage)
+
+Not part of the browser change. These commits harden
+`Sources/LogtoClient/LogtoClient/LogtoClient+PersistStorage.swift`,
+`LogtoClient+AccessToken.swift`, and the stored state in `LogtoClient.swift`:
+
+- `4f8f297` guard `saveToKeychain` during `loadFromKeychain` (load trapdoor).
+- `110e282` expose `reloadFromKeychain()`.
+- `79ec6fe` pin Keychain accessibility to `.afterFirstUnlock`.
+- `aaaac4c` three-state `PersistedTokenReloadResult`.
+- `ac9530a`, `c3fefc3`, `8dc5e4a` verified writes, `onTokenPersist`,
+  `retryPendingTokenWrites()`, serialized under `tokenPersistLock`.
+- Refresh telemetry: `onTokenRefresh` delivers a `TokenRefreshReport`
+  (returned and changed flags per token, never values), rotated tokens are
+  assigned only when they differ from memory so an unrotated refresh does
+  not rewrite the Keychain, and `accessTokenExpiryMargin` (60 s) refreshes a
+  cached access token before it expires in transit. Tests in
+  `Tests/LogtoClientTests/LogtoClient/LogtoClientTests+RefreshTelemetry.swift`.
+
+The consumer-side contract is in the Calido repository under `ISSUES-LOGTO.md`
+section 1.6.
+
 ## 4. Working on the fork
 
 ### 4.1 Local setup

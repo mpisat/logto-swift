@@ -5,8 +5,30 @@
 //  Created by Gao Sun on 2022/2/5.
 //
 
+import Darwin
 import Foundation
 import Logto
+
+private func refreshContinuousTime() -> TimeInterval {
+    var timebase = mach_timebase_info_data_t()
+    mach_timebase_info(&timebase)
+    return Double(mach_continuous_time()) * Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000
+}
+
+private struct RefreshRetrySession: NetworkSession {
+    let session: NetworkSession
+    let deadline: TimeInterval
+
+    func loadData(with request: URLRequest) async -> (Data?, Error?) {
+        guard !Task.isCancelled else { return (nil, CancellationError()) }
+        let remaining = deadline - refreshContinuousTime()
+        guard remaining > 0 else { return (nil, URLError(.timedOut)) }
+        var request = request
+        // URLSession treats this as an idle timeout, not a hard deadline.
+        request.timeoutInterval = min(request.timeoutInterval, remaining)
+        return await session.loadData(with: request)
+    }
+}
 
 /// What a successful refresh did to the cached tokens. The provider returns
 /// `refresh_token` on every success whether or not it rotated, so `changed`
@@ -52,15 +74,34 @@ public extension LogtoClient {
         let oidcConfig = try await fetchOidcConfig()
 
         do {
-            let response = try await LogtoCore.fetchToken(
-                useSession: networkSession,
-                byRefreshToken: refreshToken,
-                tokenEndpoint: oidcConfig.tokenEndpoint,
-                clientId: logtoConfig.appId,
-                resource: resource,
-                scopes: nil,
-                organizationId: organizationId
-            )
+            let fetchToken = { (session: NetworkSession) async throws in
+                try await LogtoCore.fetchToken(
+                    useSession: session,
+                    byRefreshToken: refreshToken,
+                    tokenEndpoint: oidcConfig.tokenEndpoint,
+                    clientId: self.logtoConfig.appId,
+                    resource: resource,
+                    scopes: nil,
+                    organizationId: organizationId
+                )
+            }
+            let startedAt = refreshContinuousTime()
+            let response: LogtoCore.RefreshTokenTokenResponse
+            do {
+                response = try await fetchToken(networkSession)
+            } catch {
+                // One early transport retry can use the provider's existing
+                // reuse grace. It cannot recover a delayed or lost response
+                // after that grace, and does not change rotation policy.
+                guard (error as? URLError)?.code == .networkConnectionLost,
+                      !Task.isCancelled,
+                      refreshContinuousTime() - startedAt <= 1
+                else { throw error }
+                response = try await fetchToken(RefreshRetrySession(
+                    session: networkSession,
+                    deadline: startedAt + 2
+                ))
+            }
 
             let accessToken = AccessToken(
                 token: response.accessToken,

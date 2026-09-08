@@ -10,6 +10,32 @@ import Foundation
 import XCTest
 
 final class URLSessionTests: XCTestCase {
+    func testMissingResponsePreservesTransportError() {
+        let (data, error) = URLSession.shared.handleResponse(
+            data: nil, response: nil,
+            error: NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost)
+        )
+        XCTAssertNil(data)
+        XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
+    }
+
+    func testHttpRejectionTakesPrecedenceOverTransportError() {
+        for status in [400, 401] {
+            let response = HTTPURLResponse(
+                url: URL(string: "https://logto.dev")!, statusCode: status,
+                httpVersion: nil, headerFields: nil
+            )
+            let (_, error) = URLSession.shared.handleResponse(
+                data: nil, response: response, error: URLError(.networkConnectionLost)
+            )
+            guard case let .withCode(code, _, _)? = error as? LogtoErrors.Response else {
+                XCTFail("Expected the HTTP rejection")
+                continue
+            }
+            XCTAssertEqual(code, status)
+        }
+    }
+
     func testHandleResponseOk() {
         let mockData = "123".data(using: .utf8)!
         let response = HTTPURLResponse(

@@ -428,3 +428,29 @@ adopt it and this section should shrink to a pointer.
   checklist, rollback mapping table.
 - Upstream docs: `README.md` in this repo (unchanged).
 - `ASWebAuthenticationSession` docs: [Apple Developer — AuthenticationServices](https://developer.apple.com/documentation/authenticationservices/aswebauthenticationsession).
+
+## 7. Bounded refresh response-loss recovery
+
+A refresh exchange retries once, immediately, only when the transport reports
+`URLError.networkConnectionLost` within one second of the first request starting.
+Elapsed time uses `mach_continuous_time`, which advances during device sleep.
+The retry request's idle timeout is limited to the remainder of a two-second
+budget from that original start. URLSession restarts this timeout as data arrives;
+it is not a hard two-second wall-clock deadline. HTTP rejection, cancellation,
+timeout, a later connection loss, and a failed second attempt do not trigger this retry.
+HTTP error responses remain authoritative even when a transport error is also
+present. When no HTTP response exists, the original transport error is preserved.
+
+This uses the deployed Logto provider's existing three-second reuse grace; it
+does not disable rotation, extend grace, bypass validation, or change token
+persistence. The normal response path still adopts and persists replacements.
+It cannot recover a response lost beyond the grace window or an already revoked
+grant. A request timeout cannot guarantee when a server receives a request,
+especially across suspension, so this is limited early-loss recovery and does
+not establish closure of Calido IOS-050 or prove physical-device idle recovery.
+
+The regression suite injects a lost first response into the actual SDK and its
+transport response normalizer, then supplies the replacement on the immediate
+retry. It also covers slow loss, permanent rejection, timeout, cancellation,
+and a second failure. These are controlled software tests, not a reproduction
+of the complete physical-device incident.

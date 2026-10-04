@@ -28,7 +28,55 @@ public class LogtoClient {
         var signOutPresentationContextProvider: ASWebAuthenticationPresentationContextProviding?
     #endif
 
+    /// Suppresses observer write-back while an atomic Keychain load assigns
+    /// both tokens. Failed reads leave the in-memory pair untouched.
+    internal var isLoadingFromKeychain = false
+
+    /// Serializes persistence bookkeeping across token updates and lifecycle
+    /// retries, which can arrive on different executors.
+    internal let tokenPersistLock = NSRecursiveLock()
+
+    struct PendingTokenWrite {
+        let value: String?
+    }
+
+    /// Latest value whose persist attempt was not confirmed by a read-back.
+    /// The captured value avoids reading token properties concurrently from a
+    /// lifecycle retry running on another executor.
+    internal var pendingTokenWrites = [KeyName: PendingTokenWrite]()
+    internal var tokenPersistCallback: (@Sendable (PersistedTokenWriteReport) -> Void)?
+    internal var tokenRefreshCallback: (@Sendable (TokenRefreshReport) -> Void)?
+
+    @discardableResult
+    internal func withTokenPersistLock<T>(_ operation: () throws -> T) rethrows -> T {
+        tokenPersistLock.lock()
+        defer { tokenPersistLock.unlock() }
+        return try operation()
+    }
+
     // MARK: Public Variables
+
+    /// Called after every persist attempt, including retries. Reports the key
+    /// and the outcome, never the token value.
+    ///
+    /// Exists because a failed Keychain write of a rotated refresh token used
+    /// to be silent: the host had no way to know its session had become
+    /// undurable, and the next cold launch presented a superseded token and
+    /// was forced back through the browser.
+    /// Invoked synchronously from the `didSet` observers, which run on
+    /// whichever executor performed the assignment, so it is `@Sendable` and
+    /// the host is responsible for hopping to its own isolation.
+    public var onTokenPersist: (@Sendable (PersistedTokenWriteReport) -> Void)? {
+        get { withTokenPersistLock { tokenPersistCallback } }
+        set { withTokenPersistLock { tokenPersistCallback = newValue } }
+    }
+
+    /// Reports every successful token refresh. Carries rotation flags only,
+    /// never token text. See `TokenRefreshReport`.
+    public var onTokenRefresh: (@Sendable (TokenRefreshReport) -> Void)? {
+        get { withTokenPersistLock { tokenRefreshCallback } }
+        set { withTokenPersistLock { tokenRefreshCallback = newValue } }
+    }
 
     /// The cached ID Token in raw string.
     /// Use `.getIdTokenClaims()` to retrieve structured data.
@@ -72,6 +120,7 @@ public class LogtoClient {
 
         if config.usingPersistStorage {
             keychain = Keychain(service: LogtoClient.keychainServiceName)
+                .accessibility(.afterFirstUnlock)
             loadFromKeychain()
         } else {
             keychain = nil

@@ -258,4 +258,22 @@ extension LogtoClientTests {
         XCTAssertEqual(client.idToken, IdTokenFixtures.rsaIdToken)
         XCTAssertEqual(client.refreshToken, "bar")
     }
+    #if os(iOS)
+        @MainActor
+        func testPublicBrowserNoAnchorPreservesCredentialsAndReleasesSignInGuard() async throws {
+            let client = buildClient(withToken: true)
+            do {
+                try await client.signInWithBrowser(
+                    redirectUri: "io.logto.test://callback", presentationScene: nil
+                )
+                XCTFail("A headless test process cannot present browser sign-in")
+            } catch let error as LogtoClientErrors.SignIn {
+                XCTAssertEqual(error.type, .noPresentationAnchor)
+            }
+            XCTAssertFalse(client.isSigningIn)
+            XCTAssertEqual(client.idToken, initialIdToken)
+            XCTAssertEqual(client.refreshToken, initialRefreshToken)
+        }
+    #endif
+
 }

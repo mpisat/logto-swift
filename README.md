@@ -24,6 +24,14 @@ v2 moves the iOS sign-in experience from an embedded WebView to `ASWebAuthentica
 - **Upgrading from v1?** Follow [MIGRATION.md](./MIGRATION.md).
 - This README documents v2. The v1 documentation lives in the [`v1.x` README](https://github.com/logto-io/swift/blob/v1.x/README.md).
 
+## Calido native-browser fork
+
+This repository's `codex/native-browser-v2` branch starts from official Swift SDK 2.0.0 and preserves Calido's token persistence and refresh contracts. Use `https://github.com/mpisat/logto-swift.git` with an exact reviewed commit on that branch, rather than the official version selector below. The published `native-browser` branch remains available for rollback.
+
+The fork retains v2 system-browser sign-in and its main-actor concurrency guard. The optional `presentationScene` parameter selects the caller's foreground scene; sign-in fails with `noPresentationAnchor` when no foreground window is available. System cancellation remains `authFailed` with the system error attached.
+
+See [FORK-MAINTENANCE.md](FORK-MAINTENANCE.md) for the release base, preserved contracts, test evidence, and remaining physical-device gates.
+
 ## Installation
 
 ### Swift Package Manager

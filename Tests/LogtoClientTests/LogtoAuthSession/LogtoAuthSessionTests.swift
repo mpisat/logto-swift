@@ -86,4 +86,42 @@ final class LogtoAuthSessionTests: XCTestCase {
 
         _ = try await session.handle(callbackUri: XCTUnwrap(components.url))
     }
+    func testCallbackRejectsHostAndPathPrefixCollisionsBeforeTokenExchange() async throws {
+        for (redirect, callback) in [
+            ("io.logto.test://callback", "io.logto.test://callback.evil"),
+            ("io.logto.test://callback/path", "io.logto.test://callback/path-extra"),
+            ("io.logto.test://callback/path", "io.logto.test://callback/PATH"),
+        ] {
+            NetworkSessionMock.shared.tokenRequestCount = 0
+            let session = LogtoAuthSession(
+                useSession: NetworkSessionMock.shared,
+                logtoConfig: try LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
+                oidcConfig: getMockOidcConfig(tokenEndpoint: "https://logto.dev/token:good"),
+                redirectUri: try XCTUnwrap(URL(string: redirect))
+            )
+            let url = try XCTUnwrap(URL(string: "\(callback)?state=\(session.state)&code=abc"))
+            do {
+                _ = try await session.handle(callbackUri: url)
+                XCTFail("A colliding redirect must be rejected")
+            } catch let error as LogtoClientErrors.SignIn {
+                XCTAssertEqual(error.type, .unexpectedSignInCallback)
+                XCTAssertEqual(error.innerError as? LogtoErrors.UriVerification, .redirectUriMismatched)
+            }
+            XCTAssertEqual(NetworkSessionMock.shared.tokenRequestCount, 0)
+        }
+    }
+
+    func testCallbackAcceptsCaseInsensitiveSchemeAndHostWithExactPath() async throws {
+        NetworkSessionMock.shared.tokenRequestCount = 0
+        let session = LogtoAuthSession(
+            useSession: NetworkSessionMock.shared,
+            logtoConfig: try LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
+            oidcConfig: getMockOidcConfig(tokenEndpoint: "https://logto.dev/token:good"),
+            redirectUri: try XCTUnwrap(URL(string: "io.logto.test://callback/path"))
+        )
+        let callback = try XCTUnwrap(URL(string: "IO.LOGTO.TEST://CALLBACK/path?state=\(session.state)&code=abc"))
+        let response = try await session.handle(callbackUri: callback)
+        XCTAssertEqual(response.accessToken, "123")
+    }
+
 }

@@ -7,6 +7,9 @@
 
 import Foundation
 import Logto
+#if os(iOS)
+    import UIKit
+#endif
 
 class LogtoAuthSession {
     typealias Errors = LogtoClientErrors
@@ -21,6 +24,10 @@ class LogtoAuthSession {
     let loginHint: String?
     let directSignIn: LogtoCore.DirectSignInOptions?
     let extraParams: [String: String]?
+
+    #if os(iOS)
+        weak var preferredPresentationScene: UIWindowScene?
+    #endif
 
     var callbackUri: URL?
 

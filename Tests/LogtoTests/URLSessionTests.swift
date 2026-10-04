@@ -56,4 +56,11 @@ final class URLSessionTests: XCTestCase {
             return
         }
     }
+    func testNoResponsePreservesOriginalTransportError() {
+        let original = URLError(.networkConnectionLost)
+        let (data, error) = URLSession.shared.handleResponse(data: nil, response: nil, error: original)
+        XCTAssertNil(data)
+        XCTAssertEqual((error as? URLError)?.code, .networkConnectionLost)
+    }
+
 }

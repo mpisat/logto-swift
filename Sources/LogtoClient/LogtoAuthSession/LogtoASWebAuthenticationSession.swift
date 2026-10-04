@@ -17,9 +17,24 @@
         private let continuation: CheckedContinuation<LogtoCore.CodeTokenResponse, Error>
         private let lock = NSLock()
         private var isResolved = false
+        private var callbackClaimed = false
 
         init(_ continuation: CheckedContinuation<LogtoCore.CodeTokenResponse, Error>) {
             self.continuation = continuation
+        }
+
+        func claimCallback() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !isResolved && !callbackClaimed else { return false }
+            callbackClaimed = true
+            return true
+        }
+
+        var canHandleCallback: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !isResolved
         }
 
         func resume(returning response: LogtoCore.CodeTokenResponse) {
@@ -200,12 +215,19 @@
             Self.authenticationCallback(for: redirectUri)
         }
 
+        @MainActor
         private func startAuthenticationSession(with authUri: URL) async throws -> LogtoCore.CodeTokenResponse {
-            try await withCheckedThrowingContinuation { continuation in
+            if let context = presentationContextProvider as? LogtoAuthContext,
+               !context.prepareSignIn(preferredScene: preferredPresentationScene)
+            {
+                throw Errors.SignIn(type: .noPresentationAnchor, innerError: nil)
+            }
+            return try await withCheckedThrowingContinuation { continuation in
                 let resolver = LogtoASWebAuthenticationSessionContinuation(continuation)
                 let session = authenticationSessionFactory(authUri,
                                                            authenticationCallback)
                 { [weak self] callbackUri, error in
+                    guard resolver.claimCallback() else { return }
                     guard let self else {
                         resolver.resume(throwing: Errors.SignIn(type: .authFailed, innerError: nil))
                         return
@@ -217,7 +239,8 @@
                         return
                     }
 
-                    Task {
+                    Task { @MainActor in
+                        guard resolver.canHandleCallback else { return }
                         defer {
                             self.authenticationSession = nil
                         }

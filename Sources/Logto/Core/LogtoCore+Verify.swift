@@ -14,8 +14,11 @@ public extension LogtoCore {
         redirectUri: URL,
         state: String
     ) throws -> String {
-        // OIDC Provider will convert callback URI to lowercase
-        guard callbackUri.absoluteString.lowercased().starts(with: redirectUri.absoluteString.lowercased()) else {
+        guard callbackUri.scheme?.lowercased() == redirectUri.scheme?.lowercased(),
+              callbackUri.host?.lowercased() == redirectUri.host?.lowercased(),
+              callbackUri.port == redirectUri.port,
+              callbackUri.path == redirectUri.path
+        else {
             throw LogtoErrors.UriVerification.redirectUriMismatched
         }
 

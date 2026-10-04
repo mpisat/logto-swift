@@ -14,7 +14,7 @@ extension URLSession: NetworkSession {
         error: Error?
     ) -> (Data?, Error?) {
         guard let httpResponse = response as? HTTPURLResponse else {
-            return (nil, LogtoErrors.Response.notHttpResponse(response: response))
+            return (nil, error ?? LogtoErrors.Response.notHttpResponse(response: response))
         }
 
         guard httpResponse.statusCode < 400 else {

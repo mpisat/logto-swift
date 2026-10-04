@@ -38,6 +38,8 @@ public enum LogtoClientErrorTypes {
         case authFailed
         /// A sign-in session is already in progress.
         case signInSessionAlreadyInProgress
+        /// No foreground-active window is available to present browser sign-in.
+        case noPresentationAnchor
         /// Unable to construct Redirect URI for the given string.
         case unableToConstructRedirectUri
         /// Unable to construct Redirect URI for the config.

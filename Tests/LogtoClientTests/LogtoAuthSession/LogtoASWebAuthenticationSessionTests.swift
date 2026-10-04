@@ -23,6 +23,7 @@
         private let callbackUri: URL?
         private let callbackError: Error?
         private let completesOnStart: Bool
+        var duplicateCallback = false
         private let completionHandler: LogtoASWebAuthenticationSession.CompletionHandler
 
         init(
@@ -42,6 +43,7 @@
         func start() -> Bool {
             if completesOnStart {
                 completionHandler(callbackUri, callbackError)
+                if duplicateCallback { completionHandler(callbackUri, callbackError) }
             }
 
             return shouldStart
@@ -159,16 +161,19 @@
             XCTAssertNotNil(mockSession.presentationContextProvider)
         }
 
+        @MainActor
         func testStartAuthFailedWhenUserCancels() async throws {
             let authSession = try LogtoASWebAuthenticationSession(
                 useSession: NetworkSessionMock.shared,
                 logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
                 oidcConfig: getMockOidcConfig(),
-                redirectUri: customRedirectUri
+                redirectUri: customRedirectUri,
+                presentationContextProvider: PresentationContextProviderMock()
             ) { _, _, completionHandler in
                 LogtoSystemAuthenticationSessionMock(
                     callbackUri: nil,
-                    callbackError: AuthenticationSessionMockError(),
+                    callbackError: NSError(domain: ASWebAuthenticationSessionError.errorDomain,
+                                           code: ASWebAuthenticationSessionError.Code.canceledLogin.rawValue),
                     completionHandler: completionHandler
                 )
             }
@@ -177,19 +182,22 @@
                 _ = try await authSession.start()
             } catch let error as LogtoClientErrors.SignIn {
                 XCTAssertEqual(error.type, .authFailed)
-                XCTAssertNotNil(error.innerError)
+                XCTAssertEqual((error.innerError as NSError?)?.domain, ASWebAuthenticationSessionError.errorDomain)
+                XCTAssertEqual((error.innerError as NSError?)?.code, ASWebAuthenticationSessionError.Code.canceledLogin.rawValue)
                 return
             }
 
             XCTFail()
         }
 
+        @MainActor
         func testStartAuthFailedWhenSessionDoesNotStart() async throws {
             let authSession = try LogtoASWebAuthenticationSession(
                 useSession: NetworkSessionMock.shared,
                 logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
                 oidcConfig: getMockOidcConfig(),
-                redirectUri: customRedirectUri
+                redirectUri: customRedirectUri,
+                presentationContextProvider: PresentationContextProviderMock()
             ) { _, _, completionHandler in
                 LogtoSystemAuthenticationSessionMock(
                     shouldStart: false,
@@ -208,12 +216,14 @@
             XCTFail()
         }
 
+        @MainActor
         func testStartUnexpectedCallback() async throws {
             let authSession = try LogtoASWebAuthenticationSession(
                 useSession: NetworkSessionMock.shared,
                 logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
                 oidcConfig: getMockOidcConfig(),
-                redirectUri: customRedirectUri
+                redirectUri: customRedirectUri,
+                presentationContextProvider: PresentationContextProviderMock()
             ) { _, _, completionHandler in
                 LogtoSystemAuthenticationSessionMock(
                     callbackUri: URL(string: "io.logto.test://callback?state=unexpected&code=abc"),
@@ -243,7 +253,8 @@
                 useSession: NetworkSessionMock.shared,
                 logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
                 oidcConfig: getMockOidcConfig(),
-                redirectUri: redirectUri
+                redirectUri: redirectUri,
+                presentationContextProvider: PresentationContextProviderMock()
             ) { _, callback, completionHandler in
                 capturedCallback = callback
                 return LogtoSystemAuthenticationSessionMock(
@@ -257,6 +268,51 @@
             XCTAssertEqual(response.accessToken, "123")
             XCTAssertEqual(capturedCallback, .https(host: "example.com", path: "/callback"))
             XCTAssertNil(capturedCallback?.callbackURLScheme)
+        }
+
+        @MainActor
+        func testMissingPresentationAnchorFailsBeforeStartingSystemSession() async throws {
+            var starts = 0
+            let authSession = try LogtoASWebAuthenticationSession(
+                useSession: NetworkSessionMock.shared,
+                logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
+                oidcConfig: getMockOidcConfig(),
+                redirectUri: customRedirectUri
+            ) { _, _, completion in
+                starts += 1
+                return LogtoSystemAuthenticationSessionMock(
+                    callbackError: AuthenticationSessionMockError(), completionHandler: completion
+                )
+            }
+            do {
+                _ = try await authSession.start()
+                XCTFail("Sign-in needs a real presentation window")
+            } catch let error as LogtoClientErrors.SignIn {
+                XCTAssertEqual(error.type.rawValue, "noPresentationAnchor")
+            }
+            XCTAssertEqual(starts, 0)
+        }
+
+        @MainActor
+        func testDuplicateSystemCallbackExchangesTokensOnce() async throws {
+            NetworkSessionMock.shared.tokenRequestCount = 0
+            var authSession: LogtoASWebAuthenticationSession!
+            authSession = try LogtoASWebAuthenticationSession(
+                useSession: NetworkSessionMock.shared,
+                logtoConfig: LogtoConfig(endpoint: "https://logto.dev", appId: "foo"),
+                oidcConfig: getMockOidcConfig(),
+                redirectUri: customRedirectUri,
+                presentationContextProvider: PresentationContextProviderMock()
+            ) { _, _, completion in
+                let mock = LogtoSystemAuthenticationSessionMock(
+                    callbackUri: self.getCallbackUri(state: authSession.state), completionHandler: completion
+                )
+                mock.duplicateCallback = true
+                return mock
+            }
+            _ = try await authSession.start()
+            try await Task.sleep(nanoseconds: 20_000_000)
+            XCTAssertEqual(NetworkSessionMock.shared.tokenRequestCount, 1)
         }
     }
 #endif

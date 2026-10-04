@@ -313,4 +313,23 @@ final class LogtoUtilitiesTests: XCTestCase {
             )
         )
     }
+    func testSignedTokenDefaultExpiryToleranceBoundary() throws {
+        let jwks = try JWKSet(keys: [RSAPublicKey(data: Data(IdTokenFixtures.expiryBoundaryJwkJson.utf8))])
+        func verify(_ time: TimeInterval) throws {
+            try LogtoUtilities.verifyIdToken(
+                IdTokenFixtures.expiryBoundaryToken,
+                issuer: IdTokenFixtures.issuer, clientId: IdTokenFixtures.clientId,
+                jwks: jwks, forTimeInterval: time
+            )
+        }
+        // exp is 1641812018, iat is one second earlier.
+        XCTAssertNoThrow(try verify(1_641_812_317)) // exp + 299, iat + 300
+        XCTAssertThrowsError(try verify(1_641_812_318)) { // exp + 300
+            XCTAssertEqual($0 as? LogtoErrors.Verification, .jwtExpired)
+        }
+        XCTAssertThrowsError(try verify(1_641_812_319)) {
+            XCTAssertEqual($0 as? LogtoErrors.Verification, .jwtExpired)
+        }
+    }
+
 }

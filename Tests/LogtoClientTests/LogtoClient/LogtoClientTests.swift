@@ -77,4 +77,14 @@ final class LogtoClientTests: XCTestCase {
 
         XCTAssertNotNil(client.keychain)
     }
+    func testCachedAccessTokenInsideSixtySecondMarginRefreshes() async throws {
+        NetworkSessionMock.shared.tokenRequestCount = 0
+        let client = buildClient(withToken: true)
+        client.accessTokenMap[client.buildAccessTokenKey(for: "resource1", in: nil)] = AccessToken(
+            token: "almost-expired", scope: "", expiresAt: Date().timeIntervalSince1970 + 55
+        )
+        let token = try await client.getAccessToken(for: "resource1")
+        XCTAssertEqual(token, "123")
+    }
+
 }

@@ -7,6 +7,9 @@
 
 import Foundation
 import Logto
+#if os(iOS)
+    import UIKit
+#endif
 
 extension LogtoClient {
     @MainActor
@@ -15,7 +18,8 @@ extension LogtoClient {
         redirectUri: String,
         loginHint: String? = nil,
         directSignIn: LogtoCore.DirectSignInOptions? = nil,
-        extraParams: [String: String]? = nil
+        extraParams: [String: String]? = nil,
+        configureSession: (AuthSession) -> Void = { _ in }
     ) async throws {
         guard let redirectUri = URL(string: redirectUri) else {
             throw (LogtoClientErrors.SignIn(type: .unableToConstructRedirectUri, innerError: nil))
@@ -41,6 +45,7 @@ extension LogtoClient {
             extraParams: extraParams
         )
 
+        configureSession(session)
         let response = try await session.start()
         let jwks = try await fetchJwkSet()
 
@@ -79,6 +84,7 @@ public extension LogtoClient {
             - loginHint: Login hint indicates the current user (usually an email address or phone number).
             - directSignIn: Parameters for direct sign-in.
             - extraParams: Extra parameters for the authentication request.
+            - presentationScene: The caller's scene for choosing the browser presentation window.
          - Throws: An error if the session failed to complete.
          */
         @MainActor
@@ -86,14 +92,16 @@ public extension LogtoClient {
             redirectUri: String,
             loginHint: String? = nil,
             directSignIn: LogtoCore.DirectSignInOptions? = nil,
-            extraParams: [String: String]? = nil
+            extraParams: [String: String]? = nil,
+            presentationScene: UIWindowScene? = nil
         ) async throws {
             try await signInWithBrowser(
                 authSessionType: LogtoASWebAuthenticationSession.self,
                 redirectUri: redirectUri,
                 loginHint: loginHint,
                 directSignIn: directSignIn,
-                extraParams: extraParams
+                extraParams: extraParams,
+                configureSession: { $0.preferredPresentationScene = presentationScene }
             )
         }
     #else

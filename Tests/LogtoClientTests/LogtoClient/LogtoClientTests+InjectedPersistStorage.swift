@@ -229,6 +229,40 @@ final class LogtoClientInjectedPersistStorageTests: XCTestCase {
         XCTAssertTrue(client.hasPendingTokenWrites)
     }
 
+    func testRefreshOnlyLogoutDeletionFailureRetainsNilForRetry() async {
+        let client = makeDetachedClient("persist-refresh-only-logout")
+        var store = ["refresh_token": "stored-refresh"]
+        client.loadFromKeychain { store[$0] }
+        // Local clearing must still run when discovery cannot be fetched.
+        let error = await client.clearCredentials()
+        XCTAssertEqual(error?.type, .unableToFetchOidcConfig)
+        XCTAssertNil(client.refreshToken)
+
+        let failure = client.persist(
+            key: .refreshToken, isRetry: false,
+            write: { _, _ in XCTFail("Logout must delete rather than write a token") },
+            remove: { _ in throw Status.interactionNotAllowed },
+            read: { store[$0] }
+        )
+        XCTAssertEqual(failure.result, .failed(Status.interactionNotAllowed.rawValue))
+        XCTAssertTrue(client.hasPendingTokenWrites)
+        XCTAssertNotNil(client.pendingTokenWrites[.refreshToken])
+        XCTAssertNil(client.pendingTokenWrites[.refreshToken]?.value)
+        XCTAssertEqual(store["refresh_token"], "stored-refresh")
+
+        let retry = client.persist(
+            key: .refreshToken, isRetry: true,
+            write: { _, _ in XCTFail("Retry must preserve the deletion intention") },
+            remove: { store[$0] = nil },
+            read: { store[$0] }
+        )
+        XCTAssertEqual(retry.result, .verified)
+        XCTAssertTrue(retry.isRetry)
+        XCTAssertFalse(client.hasPendingTokenWrites)
+        XCTAssertNil(store["refresh_token"])
+        XCTAssertNil(client.refreshToken)
+    }
+
     /// Step 3: the retry writes the **in-memory** value, which is the current
     /// one, and clears the pending flag once the read-back matches.
     func testRetryWritesInMemoryValueAndClearsPending() {

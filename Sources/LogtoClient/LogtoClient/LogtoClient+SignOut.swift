@@ -19,11 +19,14 @@ public extension LogtoClient {
      */
     @discardableResult
     func clearCredentials() async -> LogtoClientErrors.SignOut? {
-        guard isAuthenticated else {
+        let hadCredentials = idToken != nil || refreshToken != nil || !accessTokenMap.isEmpty
+        // A persisted refresh-only session is usable even without an ID token.
+        // Always attempt local deletion, including when memory is already empty.
+        let tokenToRevoke = clearLocalCredentials()
+
+        guard hadCredentials else {
             return LogtoClientErrors.SignOut(type: .notAuthenticated, innerError: nil)
         }
-
-        let tokenToRevoke = clearLocalCredentials()
 
         guard let token = tokenToRevoke else {
             return nil
